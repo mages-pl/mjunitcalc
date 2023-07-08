@@ -13,6 +13,14 @@ class Mjunitcalc extends Module
      * Definicja hooka w edycji produktu dla zdefiniowania jednostki + przeliczenia jednostki 
      * Definicja crona który będzie odpowiednio przenosić te dane do właściwości produktów tj jednostka + promocja jednostki 
      */
+
+    public $arr_units = [
+        'kilogram' => "kg",
+        'litr' => 'l',
+        'metr' => 'm',
+        'metr kwadratowy' => 'm2'
+    ];
+
     public function __construct()
     {
         $this->name = 'mjunitcalc';
@@ -32,8 +40,13 @@ class Mjunitcalc extends Module
 
     public function install()
     {
-       
-       return  parent::install() && $this->registerHook("displayHomeBottomContent");
+     
+        $createTable = "CREATE TABLE IF NOT EXISTS "._DB_PREFIX_."mjunitcalc(id_product INT NOT NULL, mjunitcalc_volume FLOAT, mjunitcalc_base_unit VARCHAR(64), mjunitcalc_base_unit_short VARCHAR(16))";
+
+        DB::getInstance()->Execute($createTable);
+
+       return  parent::install() && $this->registerHook("displayAdminProductsPriceStepBottom")
+       && $this->registerHook("actionProductUpdate") && $this->registerHook("displayProductPriceBlock") && $this->registerHook('displayProductListReviews') && $this->registerHook('displayProductAdditionalInfo') && $this->registerHook('ActionObjectProductUpdateAfter') && $this->registerHook('actionObjectUpdateAfter');
     }
 
     public function uninstall()
@@ -41,161 +54,119 @@ class Mjunitcalc extends Module
         return parent::uninstall();
     }
 
-     
+     public function hookDisplayAdminProductsPriceStepBottom($params) { 
 
-    public function cronGoogle()
-    {
-        $languages = Language::getLanguages(false);
+         $getParameters = DB::getInstance()->ExecuteS("SELECT * FROM "._DB_PREFIX_."mjunitcalc WHERE id_product = '".$params['id_product']."'");
+         $getProduct = new Product($params['id_product']);
+         if(count($getParameters)) { 
+            $this->context->smarty->assign(
+                array(
+                    'mjunitcalc_volume' => $getParameters[0]['mjunitcalc_volume'],
+                    'mjunitcalc_base_unit' => $getParameters[0]['mjunitcalc_base_unit'],
+                    'id_product' => $params['id_product'],
+                    'jednostki' => $this->arr_units,
+                    'price' => $getProduct->price
+                )
+           );
+         } else { 
+            $this->context->smarty->assign(
+                array(
+                    'mjunitcalc_volume' => '',
+                    'mjunitcalc_base_unit' => '',
+                    'id_product' => $params['id_product'],
+                    'jednostki' => $this->arr_units,
+                    'price' => $getProduct->price
+                )
+           );
+         }
 
-        foreach ($languages as $lang) {
-            $products = @Product::getProducts($lang['id_lang'], null, null, 'id_product', 'ASC');
+       
+        return $this->fetch('module:mjunitcalc/views/templates/hooks/admin_products_prices.tpl');
+     }
 
-            $getIdsProduct = explode(",", Configuration::get('mj_google_ignore_ids'));
-            $default_carrier = new Carrier((int) Configuration::get('PS_CARRIER_DEFAULT'));
+     public function hookActionProductUpdate($params) { 
 
-            $xml = new GoolgeSimpleXMLElement('<?xml version="1.0"?><rss xmlns:g="http://base.google.com/ns/1.0" version="2.0"/>');
+        $getProduct = $params['product'];
 
-            $produkty = $xml->addChild("channel");
+        $checkIfExist = DB::getInstance()->ExecuteS("SELECT * FROM "._DB_PREFIX_."mjunitcalc WHERE id_product = '".$getProduct->id."' LIMIT 1");
 
-            $produkty->addChild("data", date('d-m-Y H:i:s'));
-            $produkty->addChild("title", Configuration::get('PS_SHOP_NAME'));  // set title
-            if($lang['id_lang'] == '1') { 
-                //$newUrl = str_replace(".de",".pl", __PS_BASE_URI__);
-                $produkty->addChild("link", iconv("UTF-8", "UTF-8", str_replace(".de",".pl",Tools::getHttpHost(true)) ));
-            } else {
-                $produkty->addChild("link", iconv("UTF-8", "UTF-8", Tools::getHttpHost(true) . __PS_BASE_URI__));    
+        if(count($checkIfExist) > 0) { 
+            // Istnieje, aktualizuj 
+            if(!empty(Tools::getValue('mjunitcalc_volume')) && !empty(Tools::getValue('mjunitcalc_base_unit'))) {
+                Db::getInstance()->update('mjunitcalc', array(
+                    'mjunitcalc_volume' => pSQL(Tools::getValue('mjunitcalc_volume')),
+                    'mjunitcalc_base_unit' => pSQL(Tools::getValue('mjunitcalc_base_unit')),
+                    'mjunitcalc_base_unit_short' => $this->getShortUnitFromUnit(pSQL(Tools::getValue('mjunitcalc_base_unit'))),
+                ), 'id_product = '.$getProduct->id, 1, true);
             }
-            $produkty->addChild("description", iconv("UTF-8", "UTF-8", Configuration::get('PS_SHOP_DESC'))); //set opis
+        } else { 
+            // Nie istnieje dodaj
+            Db::getInstance()->insert('mjunitcalc', array( 
+                'id_product' => pSQL($getProduct->id),
+                'mjunitcalc_volume' => pSQL(Tools::getValue('mjunitcalc_volume')),
+                'mjunitcalc_base_unit' => pSQL(Tools::getValue('mjunitcalc_base_unit')),
+                'mjunitcalc_base_unit_short' => $this->getShortUnitFromUnit(pSQL(Tools::getValue('mjunitcalc_base_unit')))
+                ));    
+        } 
 
-            foreach ($products as $key => $product) {
-                if (in_array($product['id_category_default'], (array) unserialize(Configuration::get('mj_google_tree_filled')))) {
-                    if ((float)$product['price'] >= (float) Configuration::get('mj_google_price')) {
-                        if (((int)(Product::getRealQuantity($product['id_product'])) >= (int) Configuration::get('mj_google_qty')) || (Configuration::get('PS_ORDER_OUT_OF_STOCK') == '1')) {
-                            if ((new Product($product['id_product']))->active == true) {
-                                if (!in_array($product['id_product'], $getIdsProduct)) {
-                                    $produkt = $produkty->addChild("item");
-                                    $produkt->addChild("g:g:id", Configuration::get('mj_google_prefix').$product['id_product']);
+        $getCurrentPropertiesUnits = DB::getInstance()->ExecuteS("SELECT * FROM "._DB_PREFIX_."mjunitcalc WHERE id_product = '".$getProduct->id."' LIMIT 1");
 
-                                    $produkt->addChildWithCData("g:g:title", $product['name'], "", "");
+            
+         /*   
+        if(count($getCurrentPropertiesUnits) > 0) { 
 
-                                    // if (trim($product['description_short']) != '') {
-                                    //     $produkt->addChildWithCData("g:g:description", ucwords(Tools::strtolower(iconv("UTF-8", "UTF-8", $product['description_short']))), "", "");
-                                    // } else {
-                                        $produkt->addChildWithCData("g:g:description", ucwords(Tools::strtolower(iconv("UTF-8", "UTF-8", $product['description']))), "", "");
-                                    //}
-                                    $produkt->addChild("g:g:condition", $product['condition']);
+            $unit_price = (float) $p->price / (float)$getCurrentPropertiesUnits[0]['mjunitcalc_volume'];
+            $unity = (string) $getCurrentPropertiesUnits[0]['mjunitcalc_base_unit'];
+            
 
-                                    // Ustawianie ilości
-                                    if ((int) (Product::getRealQuantity($product['id_product'])) > 1) {
-                                        $product['quantity'] = "in stock";
-                                    } else {
-                                        $product['quantity'] = "out of stock";
-                                    }
+            DB::getInstance()->Execute("UPDATE "._DB_PREFIX_."product SET unit_price = '$unit_price', unity = '$unity' WHERE id_product = '".$getProduct->id."'");
+        }    
 
-                                    $image = Image::getCover($product['id_product']);
-                                    $p = new Product($product['id_product'], false, $lang['id_lang']);
-                                    $link = new Link;
-                                    //                $imagePath = $link->getImageLink($p->link_rewrite, $image['id_image'], 'large_default');
+      */
+     }
+ 
 
-                                    if($lang['id_lang'] == '1') { 
-                                        $shop_id = 2;
-                                    } else   {
-                                        $shop_id = 1;
-                                    }
-
-                                    $produkt->addChild("g:g:link", $link->getProductLink($product['id_product'], null, null, null, $lang['id_lang'], $shop_id)); //."?controller=product&id_product="
-
-                                    $getProductImgs = $p->getImages($lang['id_lang']);
-                                    foreach ($getProductImgs as $key => $img) {
-                                        if ($key < 10) {
-                                            if ($key == 0) {
-                                                $url_image = $link->getImageLink($p->link_rewrite, $img['id_image'], ImageType::getFormattedName('large'));
-                                                if($lang['id_lang'] == '1') {
-                                                    $newUrl = str_replace(".de",".pl",$url_image);
-                                                } else {
-                                                    $newUrl = $url_image; 
-                                                }
-                                                $produkt->addChild("g:g:image_link", (array_key_exists('HTTPS', $_SERVER) && $_SERVER['HTTPS'] == "on" ? 'https://' : 'http://') . $newUrl);
-                                            } else {
-
-                                                $url_image = $link->getImageLink($p->link_rewrite, $img['id_image'], ImageType::getFormattedName('large'));
-                                                if($lang['id_lang'] == '1') {
-                                                    $newUrl = str_replace(".de",".pl",$url_image);
-                                                } else {
-                                                    $newUrl = $url_image; 
-                                                }
-
-                                                $produkt->addChild("g:g:additional_image_link", (array_key_exists('HTTPS', $_SERVER) && $_SERVER['HTTPS'] == "on" ? 'https://' : 'http://') . $newUrl);
-                                            }
-                                        }
-                                    }
-
-                                    $produkt->addChild("g:g:availability", $product['quantity']);
-                                    if (!empty($product['ean13'])) {
-                                        $produkt->addChild("g:g:gtin", $product['ean13']);
-                                    } else {
-                                        $produkt->addChild("g:g:gtin", '');
-                                    }
-                                    $produkt->addChildWithCData("g:g:mpn", iconv("UTF-8", "UTF-8", $product['reference']));
-
-                                    $produkt->addChild("g:g:brand", Configuration::get('PS_SHOP_NAME'));
-
-                                    $produkt->addChild("g:g:adult", (Configuration::get('mj_google_adult') == 0) ? 'no' : 'yes');
-                                        //Product::getPriceStatic($product['id_product'],true, null, 2, null, false, false, 1)
-
-                                        // $id_product,
-                                        // $usetax = true,
-                                        // $id_product_attribute = null,
-                                        // $decimals = 6,
-                                        // $divisor = null,
-                                        // $only_reduc = false,
-                                        // $usereduc = true,
-                                        // $quantity = 1,
-                                        // $force_associated_tax = false,
-                                        // $id_customer = null,
-                                        // $id_cart = null,
-                                        // $id_address = null,
-                                        // &$specific_price_output = null,
-                                        // $with_ecotax = true,
-                                        // $use_group_reduction = true,
-                                        // Context $context = null,
-                                        // $use_customer_price = true,
-                                        // $id_customization = null
-                                    $produkt->addChild("g:g:price", number_format(Product::getPriceStatic($product['id_product'], true, null, 2, null, false, false, 1), 2, '.', ''). ' ' . ((new Currency(Configuration::get('PS_CURRENCY_DEFAULT')))->iso_code));
-
-                                    if (@SpecificPrice::getSpecificPrice($product['id_product'], $this->context->shop->id, $this->context->currency->id, $this->context->country->id, Group::getCurrent()->id, 1, null, 0, 0, 0)['reduction'] > 0) {
-                                        $produkt->addChild("g:g:sale_price", number_format(Product::getPriceStatic($product['id_product'], true, null, 2, null, false, true, 1), 2, '.', '') . ' ' . ((new Currency(Configuration::get('PS_CURRENCY_DEFAULT')))->iso_code));
-                                    }
-
-                                    if (Configuration::get('mj_google_size') != '0') {
-                                        $produkt->addChild("g:g:size", FeatureValue::getFeatureValuesWithLang($lang['id_lang'], Configuration::get('mj_google_size'), true)[$key]['value']);
-                                    }
-                                    if (Configuration::get('mj_google_color') != '0') {
-                                        $produkt->addChild("g:g:color", FeatureValue::getFeatureValuesWithLang($lang['id_lang'], Configuration::get('mj_google_color'), true));
-                                    }
-                                    if (Configuration::get('mj_google_material') != '0') {
-                                        $produkt->addChild("g:g:material", FeatureValue::getFeatureValuesWithLang($lang['id_lang'], Configuration::get('mj_google_material'), true));
-                                    }
-                                    if (Configuration::get('mj_google_gender') != '0') {
-                                        $produkt->addChild("g:g:gender", FeatureValue::getFeatureValuesWithLang($lang['id_lang'], Configuration::get('mj_google_gender'), true));
-                                    }
-                                    if (Configuration::get('mj_google_pattern') != '0') {
-                                        $produkt->addChild("g:g:pattern", FeatureValue::getFeatureValuesWithLang($lang['id_lang'], Configuration::get('mj_google_pattern'), true));
-                                    }
-
-                                    $dostawa = $produkt->addChild("g:g:shipping");
-                                    $dostawa->addChild("g:g:country", Tools::strtoupper($lang['iso_code']));
-
-                                    //$dostawa->addChild("g:g:price", number_format(round($default_carrier->getDeliveryPriceByWeight($product['weight'], 1), 2), 2, '.', '') . ' ' . ((new Currency(Configuration::get('PS_CURRENCY_DEFAULT')))->iso_code));
-                                    $dostawa->addChild("g:g:price", number_format(round((new Carrier(Configuration::get('mj_google_carrier')))->getDeliveryPriceByPrice(Product::getPriceStatic($product['id_product'], true, null, 2, null, false, true, 1), Configuration::get('mj_google_zone'))), 2, '.', '') . ' ' . ((new Currency(Configuration::get('PS_CURRENCY_DEFAULT')))->iso_code));
-                                    $dostawa->addChild("g:g:service", "Standard");
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            $xml->asXML(dirname(__FILE__) . "/mj-google_" . $lang['iso_code'] . ".xml");
+     public function getShortUnitFromUnit($unit)    {
+        try {
+            $short = $this->arr_units[$unit];
+            return $short;
+        } catch(\Exception $e) { 
+            return 'j';
         }
+     }
+
+     public function  hookDisplayProductPriceBlock($params)
+     { 
+       // return "cena jednostkowa";  
+       //return ' - ';
+     }
+     public function hookDisplayProductAdditionalInfo($params)  {
+         $p = $params['product'];
+
+         $getCurrentPropertiesUnits = DB::getInstance()->ExecuteS("SELECT * FROM "._DB_PREFIX_."mjunitcalc WHERE id_product = '".$p->id."' LIMIT 1");
+     }
+     public function hookDisplayProductListReviews($params) { 
+        $p = $params['product'];
+        return $p->unit_price_full;
+     }
+    public function cronUnit()
+    {
+        $getProducts = DB::getInstance()->ExecuteS("SELECT * FROM "._DB_PREFIX_."product");
+
+        foreach($getProducts as $prod) { 
+            $getCurrentPropertiesUnits = DB::getInstance()->ExecuteS("SELECT * FROM "._DB_PREFIX_."mjunitcalc WHERE id_product = '".$prod['id_product']."' LIMIT 1");
+
+            
+            if(count($getCurrentPropertiesUnits) > 0) { 
+
+                $p = new Product($prod['id_product']);
+                $p->unit_price = (float) $p->price / (float)$getCurrentPropertiesUnits[0]['mjunitcalc_volume'];
+                $p->unity = (string) $getCurrentPropertiesUnits[0]['mjunitcalc_base_unit'];
+                $p->update();
+            }            
+        }
+
+
+         
     }
 }
